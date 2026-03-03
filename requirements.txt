@@ -1,0 +1,8 @@
+anthropic
+scrapegraph-py
+pandas
+python-dotenv
+thefuzz
+python-Levenshtein
+pydantic
+tenacity
