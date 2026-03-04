@@ -8,14 +8,18 @@ STATE_REGISTRY_TEMPLATES = {
     "NJ": "https://www.njportal.com/DOR/BusinessNameSearch/Search/BusinessName?searchTerm={name}",
     "GA": "https://ecorp.sos.ga.gov/BusinessSearch?businessName={name}",
     "NC": "https://www.sosnc.gov/online_services/search/by_title/_Business_Registration?search_type=Business&q={name}",
-    "CA": "https://bizfileonline.sos.ca.gov/search/business?BusinessName={name}",
+    # CA is agentic (JS SPA with click-triggered sidebar) — no direct search URL template used
 }
 
-# States whose registries are JS-rendered SPAs — markdownify returns empty shells.
-# Use smartscraper + render_heavy_js=True for these.
-SMARTSCRAPER_STATES = {"CA"}
-
+# States whose registries require form-based or JS-click agentic scraping.
+# DE: traditional form submit. CA: JS SPA with click-triggered sidebar.
 FORM_BASED_STATES = {"DE"}
+AGENTIC_STATES = {"CA"}
+
+# States whose registries are JS-rendered SPAs where markdownify returns empty shells
+# but a direct URL can be constructed and hit with smartscraper + render_heavy_js.
+# CA was here previously — removed in favour of agentic click flow.
+SMARTSCRAPER_STATES: set = set()
 
 
 def pbcpa_search_url(street: str) -> str:
@@ -30,7 +34,7 @@ def sunbiz_detail_url(doc_id: str) -> str:
 
 def state_registry_url(state: str, entity_name: str) -> str | None:
     state = state.upper().strip()
-    if state in FORM_BASED_STATES:
+    if state in FORM_BASED_STATES or state in AGENTIC_STATES:
         return None
     template = STATE_REGISTRY_TEMPLATES.get(state)
     if not template:
@@ -39,7 +43,7 @@ def state_registry_url(state: str, entity_name: str) -> str | None:
 
 def supports_direct_url(state: str) -> bool:
     state = state.upper().strip()
-    return state in STATE_REGISTRY_TEMPLATES and state not in FORM_BASED_STATES
+    return state in STATE_REGISTRY_TEMPLATES and state not in FORM_BASED_STATES and state not in AGENTIC_STATES
 
 def _normalize_entity_name(name: str) -> str:
     name = re.sub(r"[,\.;]", " ", name.strip())

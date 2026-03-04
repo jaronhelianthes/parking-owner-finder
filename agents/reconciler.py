@@ -7,8 +7,6 @@ The brain of the pipeline. Takes the deed lookup result (and any LLC chain resul
 and reconciles them against the skip-traced enriched owner list to identify
 the most likely true owner.
 
-This is where all the research comes together into a single OwnerResult.
-
 Logic flow:
   1. If deed owner is a natural person:
        - fuzzy match against enriched list
@@ -54,15 +52,11 @@ class Reconciler:
         self.outofstate_agent = outofstate_agent
 
     def resolve(self, row: PropertyRow) -> OwnerResult:
-        """
-        Main entry point. Returns a fully populated OwnerResult for a given property row.
-        """
         result = OwnerResult(
             property_id=row.id,
             property_address=row.full_address,
         )
 
-        # ── Sparse rows: nothing to work with ────────────────────────────────
         if row.is_sparse:
             logger.info(f"[{row.id}] Sparse row — skipping scraping")
             result.confidence = Confidence.UNRESOLVED
@@ -70,7 +64,6 @@ class Reconciler:
             result.reasoning = "No enriched owners in source data and no deed lookup attempted."
             return result
 
-        # ── Step 1: Deed lookup ───────────────────────────────────────────────
         deed = self.deed_agent.lookup(row)
 
         if not deed.success:
@@ -85,7 +78,6 @@ class Reconciler:
 
         enriched_names = [o.name for o in row.enriched_owners]
 
-        # ── Step 2: Is deed owner a person or entity? ─────────────────────────
         if not is_entity_name(deed.owner_name):
             return self._resolve_person(row, result, deed, enriched_names)
         else:
@@ -99,15 +91,7 @@ class Reconciler:
 
     # ── Person resolution ─────────────────────────────────────────────────────
 
-    def _resolve_person(
-        self,
-        row: PropertyRow,
-        result: OwnerResult,
-        deed: DeedResult,
-        enriched_names: list,
-    ) -> OwnerResult:
-        """Deed owner is a natural person. Match against enriched list."""
-
+    def _resolve_person(self, row, result, deed, enriched_names) -> OwnerResult:
         idx, matched_name, score = match_name_to_enriched(
             deed.owner_name, enriched_names,
             threshold=FUZZY_MATCH_THRESHOLD,
@@ -150,9 +134,6 @@ class Reconciler:
         llc_chain: list,
         states_visited: list,
     ) -> OwnerResult:
-        """
-        Recursively pierce an LLC chain until we find a natural person or hit the hop cap.
-        """
         if hop > MAX_LLC_HOPS:
             logger.warning(f"[{row.id}] Hit LLC hop cap ({MAX_LLC_HOPS}) on '{entity_name}'")
             result.confidence = Confidence.UNRESOLVED
@@ -166,9 +147,8 @@ class Reconciler:
             return result
 
         current_state = states_visited[-1] if states_visited else "FL"
-
         foreign_result = None
-        # ── Look up the entity ────────────────────────────────────────────────
+
         if current_state == "FL":
             sunbiz = self.sunbiz_agent.lookup(entity_name, property_id=row.id)
 
@@ -181,17 +161,12 @@ class Reconciler:
                 result.reasoning = f"Sunbiz lookup failed for '{entity_name}': {sunbiz.error}"
                 return result
 
-            # If it's a foreign LLC registered in FL, hand off to out-of-state
-            # Always run out-of-state lookup for foreign LLCs to get additional address data,
-            # even if Sunbiz already gave us person members
-            foreign_result = None
             if sunbiz.is_foreign and sunbiz.state_of_formation:
                 foreign_state = sunbiz.state_of_formation.upper()
                 logger.info(f"[{row.id}] '{entity_name}' is foreign ({foreign_state}) — running out-of-state lookup")
                 states_visited = states_visited + [foreign_state]
                 foreign_result = self.outofstate_agent.lookup(entity_name, foreign_state, property_id=row.id)
 
-            # If Sunbiz has no person members but foreign registry does, use those
             if not sunbiz.person_members() and foreign_result and foreign_result.person_members():
                 person_members = foreign_result.person_members()
                 entity_members = foreign_result.entity_members()
@@ -201,9 +176,7 @@ class Reconciler:
                 entity_members = sunbiz.entity_members()
                 principal_address = sunbiz.principal_address
 
-
         else:
-            # Out-of-state registry lookup
             oos = self.outofstate_agent.lookup(entity_name, current_state, property_id=row.id)
 
             if not oos.success:
@@ -218,8 +191,9 @@ class Reconciler:
             person_members = oos.person_members()
             entity_members = oos.entity_members()
             principal_address = oos.principal_address
+            # Capture agent info from direct out-of-state lookup
+            foreign_result = oos
 
-        # ── We have person members — try to match against enriched list ───────
         if person_members:
             best_idx, best_enriched_name, best_score, best_member = self._best_person_match(
                 person_members, enriched_names
@@ -255,38 +229,44 @@ class Reconciler:
                     f"(best score: {best_score}). Chain: {' -> '.join(new_chain)}."
                 )
 
-            # Capture addresses from all sources as separate columns
             member_addr = best_member.get("address") or None
             foreign_addr = None
+
             if foreign_result:
-                # Try to find the same person in the foreign result for their address
                 for fm in (foreign_result.person_members() or []):
                     if fm.get("name", "").upper() == owner_name.upper():
                         foreign_addr = fm.get("address") or None
                         break
-                # Fall back to foreign principal address if no member match
                 if not foreign_addr and foreign_result.principal_address:
                     foreign_addr = foreign_result.principal_address
 
             result.registry_member_address = member_addr
             result.foreign_registry_address = foreign_addr
 
-            # Mailing priority: once we've pierced an LLC, deed mailing belongs
-            # to the entity — use member's personal address instead
+            # Registered agent from foreign registry
+            if foreign_result:
+                result.agent_name = foreign_result.agent_name or None
+                result.agent_address = foreign_result.agent_address or None
+
             result.owner_mailing_address, result.mailing_source = self._best_mailing(
-                deed_mailing=None,  # intentionally excluded for LLC-pierced results
+                deed_mailing=None,
                 registry_member_address=member_addr,
                 foreign_registry_address=foreign_addr,
                 fallback_deed_mailing=deed_mailing,
             )
             return result
 
-        # ── No person members — recurse into the next entity in the chain ─────
+        # ── No person members — but we may still have agent info worth saving ─
+        # Store agent info even when we can't resolve to a person, so the CSV
+        # captures whatever the foreign registry returned.
+        if foreign_result:
+            result.agent_name = foreign_result.agent_name or None
+            result.agent_address = foreign_result.agent_address or None
+
         if entity_members:
             next_entity = entity_members[0]["name"]
             logger.info(f"[{row.id}] No person members in '{entity_name}', following to '{next_entity}' (hop {hop+1})")
             new_chain = llc_chain + [next_entity]
-            # Determine the state for the next hop
             next_state = _infer_entity_state(entity_members[0])
             new_states = states_visited + ([next_state] if next_state and next_state != current_state else [])
             return self._resolve_entity(
@@ -297,7 +277,6 @@ class Reconciler:
                 states_visited=new_states,
             )
 
-        # ── No members at all — give up on this chain ─────────────────────────
         result.confidence = Confidence.UNRESOLVED
         result.resolution_source = ResolutionSource.UNRESOLVED_SCRAPE_FAIL
         result.llc_chain = llc_chain
@@ -310,21 +289,11 @@ class Reconciler:
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def _best_person_match(
-        self,
-        person_members: list,
-        enriched_names: list,
-    ) -> tuple:
-        """
-        Given a list of person members from a registry, find the best match
-        against the enriched owner list.
-        Returns (enriched_idx, enriched_name, score, member_dict).
-        Falls back to the first member if no enriched match found.
-        """
+    def _best_person_match(self, person_members, enriched_names) -> tuple:
         best_enriched_idx = None
         best_enriched_name = None
         best_score = 0
-        best_member = person_members[0]  # default: first person found
+        best_member = person_members[0]
 
         for member in person_members:
             idx, matched_name, score = match_name_to_enriched(
@@ -347,14 +316,6 @@ class Reconciler:
         foreign_registry_address: Optional[str] = None,
         fallback_deed_mailing: Optional[str] = None,
     ) -> tuple:
-        """
-        Priority for LLC-pierced results:
-          1. Member's address from Sunbiz/state registry (most directly tied to the person)
-          2. Member's address from foreign registry
-          3. Deed mailing (entity's address — last resort)
-
-        For direct person deed results, deed_mailing is passed and wins immediately.
-        """
         if deed_mailing and deed_mailing.strip():
             return deed_mailing.strip(), "deed"
         if registry_member_address and registry_member_address.strip():
@@ -367,15 +328,9 @@ class Reconciler:
 
 
 def _infer_entity_state(member: dict) -> Optional[str]:
-    """
-    Try to infer the US state of a managing member entity from its address field.
-    Very rough heuristic — used to decide which registry to query next.
-    Returns a two-letter state code or None.
-    """
     address = member.get("address", "") or ""
     if not address:
         return None
-    # Look for a two-letter state code near a zip code pattern
     import re
     match = re.search(r'\b([A-Z]{2})\s+\d{5}', address.upper())
     if match:

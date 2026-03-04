@@ -21,42 +21,14 @@ def lookup(entity_name: str, property_id: str, scraper: ScrapeGraphClient) -> Ou
     logger.info(f"[{property_id}] CA BizFile agentic scrape for '{entity_name}'")
 
     steps = [
-        {
-            "action": "navigate",
-            "url": CA_BIZFILE_URL,
-        },
-        {
-            "action": "wait_for_selector",
-            "selector": "input[placeholder*='Search'], input[type='search'], #business-search-input",
-            "timeout": 10,
-        },
-        {
-            "action": "fill_form",
-            "selector": "input[placeholder*='Search'], input[type='search'], #business-search-input",
-            "value": entity_name,
-        },
-        {
-            "action": "press_key",
-            "key": "Enter",
-        },
-        {
-            "action": "wait_for_selector",
-            "selector": "table tbody tr, .search-results-table tbody tr",
-            "timeout": 15,
-        },
-        {
-            "action": "click",
-            "selector": "table tbody tr:first-child, .search-results-table tbody tr:first-child",
-        },
-        {
-            "action": "wait_for_selector",
-            "selector": ".detail-panel, .sidebar, [class*='detail'], [class*='panel']",
-            "timeout": 10,
-        },
-        {
-            "action": "wait",
-            "seconds": 2,
-        },
+        f"Navigate to {CA_BIZFILE_URL}",
+        f"Wait for the search input box to appear on the page",
+        f"Type '{entity_name}' into the search input box",
+        f"Press Enter to submit the search",
+        f"Wait for the search results table to appear",
+        f"Click on the first row in the results table to open the detail sidebar",
+        f"Wait for the detail sidebar panel to fully load",
+        f"Wait 2 seconds for the sidebar to finish rendering",
     ]
 
     extraction_prompt = (

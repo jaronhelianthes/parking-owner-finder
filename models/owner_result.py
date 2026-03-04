@@ -45,9 +45,13 @@ class OwnerResult:
     registry_member_address: Optional[str] = None
     foreign_registry_address: Optional[str] = None
 
+    # --- Registered agent info (from out-of-state registry) ---
+    agent_name: Optional[str] = None
+    agent_address: Optional[str] = None
+
     # --- LLC chain trace ---
-    llc_chain: list = field(default_factory=list)   # e.g. ["Cohen WPB LLC", "David Cohen"]
-    states_visited: list = field(default_factory=list)  # e.g. ["FL", "MD"]
+    llc_chain: list = field(default_factory=list)
+    states_visited: list = field(default_factory=list)
 
     # --- Claude's reasoning ---
     reasoning: str = ""
@@ -70,6 +74,8 @@ class OwnerResult:
             "deed_mailing_address": self.deed_mailing_address or "",
             "registry_member_address": self.registry_member_address or "",
             "foreign_registry_address": self.foreign_registry_address or "",
+            "agent_name": self.agent_name or "",
+            "agent_address": self.agent_address or "",
             "llc_chain": " -> ".join(self.llc_chain),
             "states_visited": ", ".join(self.states_visited),
             "reasoning": self.reasoning,

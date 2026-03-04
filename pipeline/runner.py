@@ -32,12 +32,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-file_root      = "Palm_Beach_1"
-DEFAULT_INPUT  = f"data/input/{file_root}.csv"
-DEFAULT_OUTPUT = f"data/output/{file_root}_resolved.csv"
+file_root     = "Palm_Beach_1"
+DEFAULT_INPUT = f"data/input/{file_root}.csv"
+# Output is always <input_stem>_augmented.csv in data/output/
+DEFAULT_OUTPUT = f"data/output/{file_root}_augmented.csv"
 
 OUTPUT_FIELDNAMES = list(OwnerResult(property_id="", property_address="").to_csv_row().keys())
-ROW_DELAY_SECONDS = 2  # be polite to APIs between rows
+ROW_DELAY_SECONDS = 2
+
+
+def _output_path_for(input_path: str) -> str:
+    """Derive the output path from the input filename: <stem>_augmented.csv"""
+    stem = Path(input_path).stem
+    return f"data/output/{stem}_augmented.csv"
 
 
 def run(input_path: str, output_path: str, filter_id: str = None, dry_run: bool = False):
@@ -57,7 +64,6 @@ def run(input_path: str, output_path: str, filter_id: str = None, dry_run: bool 
         logger.info("Dry run complete — no scraping performed.")
         return
 
-    # ── Init shared resources ─────────────────────────────────────────────────
     scraper = ScrapeGraphClient()
     reconciler = Reconciler(
         deed_agent=DeedAgent(scraper),
@@ -65,7 +71,6 @@ def run(input_path: str, output_path: str, filter_id: str = None, dry_run: bool 
         outofstate_agent=OutOfStateAgent(scraper),
     )
 
-    # ── Output CSV — append mode so crashes don't lose progress ──────────────
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     already_done = _load_processed_ids(out_path)
@@ -77,7 +82,7 @@ def run(input_path: str, output_path: str, filter_id: str = None, dry_run: bool 
             f"{len(remaining)} remaining. "
             f"Next: {remaining[0].id if remaining else 'none'}"
         )
-    
+
     _ensure_header(out_path, OUTPUT_FIELDNAMES)
     summary = {"resolved": 0, "unresolved": 0, "error": 0}
 
@@ -101,7 +106,6 @@ def run(input_path: str, output_path: str, filter_id: str = None, dry_run: bool 
                     error=f"Unhandled exception: {e}",
                 )
 
-            # Write and flush immediately — never buffer
             writer.writerow(result.to_csv_row())
             f.flush()
 
@@ -122,7 +126,6 @@ def run(input_path: str, output_path: str, filter_id: str = None, dry_run: bool 
 
 
 def _ensure_header(path: Path, fieldnames: list):
-    """Write header if file is missing or has no header line yet."""
     if not path.exists() or path.stat().st_size == 0:
         with open(path, "w", newline="", encoding="utf-8") as f:
             csv.DictWriter(f, fieldnames=fieldnames).writeheader()
@@ -130,7 +133,6 @@ def _ensure_header(path: Path, fieldnames: list):
     with open(path, newline="", encoding="utf-8") as f:
         first_line = f.readline().strip()
     if not first_line.startswith("property_id"):
-        # Prepend header to existing content
         existing = path.read_text(encoding="utf-8")
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -180,11 +182,13 @@ def _tally(summary: dict, result: OwnerResult):
 def main():
     parser = argparse.ArgumentParser(description="Parking lot owner identification pipeline")
     parser.add_argument("--input",   default=DEFAULT_INPUT,  help="Path to input CSV")
-    parser.add_argument("--output",  default=DEFAULT_OUTPUT, help="Path to output CSV")
-    parser.add_argument("--id",      default=None,        help="Run single property ID")
-    parser.add_argument("--dry-run", action="store_true", help="No scraping, just parse")
+    parser.add_argument("--output",  default=None,           help="Path to output CSV (default: <input_stem>_augmented.csv)")
+    parser.add_argument("--id",      default=None,           help="Run single property ID")
+    parser.add_argument("--dry-run", action="store_true",    help="No scraping, just parse")
     args = parser.parse_args()
-    run(args.input, args.output, filter_id=args.id, dry_run=args.dry_run)
+
+    output = args.output or _output_path_for(args.input)
+    run(args.input, output, filter_id=args.id, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":

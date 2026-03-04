@@ -1,5 +1,3 @@
-# quick_test.py
-
 """
 quick_test.py
 
@@ -39,16 +37,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger("quick_test")
 
-file_root      = "Palm_Beach_1"
-DEFAULT_INPUT  = "data/input/Palm_Beach_1.csv"
-DEFAULT_OUTPUT = "data/output/results.csv"
+file_root     = "Palm_Beach_1"
+DEFAULT_INPUT = "data/input/Palm_Beach_1.csv"
+
+
+def _default_output(input_path: str) -> str:
+    stem = Path(input_path).stem
+    return f"data/output/{stem}_augmented.csv"
 
 
 def main():
     parser = argparse.ArgumentParser(description="Quick single-row pipeline test")
     parser.add_argument("--id",     default=None,          help="Property ID to test")
     parser.add_argument("--input",  default=DEFAULT_INPUT, help="Path to input CSV")
-    parser.add_argument("--output", default=DEFAULT_OUTPUT,help="Path to output CSV")
+    parser.add_argument("--output", default=None,          help="Path to output CSV (default: <input_stem>_augmented.csv)")
     parser.add_argument("--next",   action="store_true",   help="Run next unresolved row")
     parser.add_argument("--step",   default="full",
                         choices=["full", "deed", "sunbiz", "outofstate"],
@@ -59,9 +61,11 @@ def main():
                         help="State code for --step outofstate (e.g. CA)")
     args = parser.parse_args()
 
-    # Default to --next behavior when neither flag is provided
     if not args.next and args.id is None:
         args.next = True
+
+    if args.output is None:
+        args.output = _default_output(args.input)
 
     _check_env()
 
@@ -138,6 +142,9 @@ def _test_outofstate(scraper, args):
     print(f"  Entity name       : {result.entity_name}")
     print(f"  State             : {result.state}")
     print(f"  Principal address : {result.principal_address}")
+    print(f"  Mailing address   : {result.mailing_address}")
+    print(f"  Agent name        : {result.agent_name}")
+    print(f"  Agent address     : {result.agent_address}")
     print(f"  Error             : {result.error}")
     print(f"\n  Managing members ({len(result.managing_members)}):")
     for m in result.managing_members:
@@ -182,6 +189,10 @@ def _test_full(scraper, args):
     print(f"  Matched name        : {result.matched_enriched_name}")
     print(f"  Deed owner (raw)    : {result.deed_owner_raw}")
     print(f"  Deed mailing        : {result.deed_mailing_address}")
+    print(f"  Registry member     : {result.registry_member_address}")
+    print(f"  Foreign registry    : {result.foreign_registry_address}")
+    print(f"  Agent name          : {result.agent_name}")
+    print(f"  Agent address       : {result.agent_address}")
     print(f"  LLC chain           : {' -> '.join(result.llc_chain) or 'n/a'}")
     print(f"  States visited      : {', '.join(result.states_visited) or 'n/a'}")
     print(f"  Reasoning           : {result.reasoning}")
@@ -198,7 +209,6 @@ def _test_full(scraper, args):
 # ── CSV writer ────────────────────────────────────────────────────────────────
 
 def _ensure_header(output_path: str, fieldnames: list):
-    """Write header if file is missing or has no header line yet."""
     path = Path(output_path)
     if not path.exists() or path.stat().st_size == 0:
         with open(path, "w", newline="") as f:
@@ -214,7 +224,6 @@ def _ensure_header(output_path: str, fieldnames: list):
 
 
 def _write_result(row_dict: dict, output_path: str):
-    """Append result to output CSV. Skips if property_id already present."""
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     pid = str(row_dict.get("property_id", ""))
     fieldnames = list(row_dict.keys())

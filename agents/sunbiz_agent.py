@@ -48,6 +48,9 @@ class SunbizAgent:
         if not detail_url:
             return self._fallback_smartscraper(entity_name, sunbiz_search_url(entity_name), property_id)
 
+        if detail_url.startswith("/"):
+            detail_url = "https://search.sunbiz.org" + detail_url
+
         try:
             detail_md = self.scraper.markdownify(detail_url)
         except Exception as e:
