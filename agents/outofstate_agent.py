@@ -27,7 +27,7 @@ from utils.parse_utils import extract_json
 from agents.outofstate_result import OutOfStateResult
 
 # Per-state agent modules
-from agents.states import ca_agent
+from agents.states import ca_agent, ny_agent, md_agent, ga_agent
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,9 @@ class OutOfStateAgent:
     def _lookup_agentic(self, entity_name: str, state: str, property_id: str) -> OutOfStateResult:
         if state == "CA":
             return ca_agent.lookup(entity_name, property_id, self.scraper)
+        elif state == "NY": return ny_agent.lookup(entity_name, property_id, self.scraper)
+        elif state == "MD": return md_agent.lookup(entity_name, property_id, self.scraper)
+        elif state == "GA": return md_agent.lookup(entity_name, property_id, self.scraper)
         return OutOfStateResult(error=f"No agentic handler implemented for {state}")
 
     # ------------------------------------------------------------------

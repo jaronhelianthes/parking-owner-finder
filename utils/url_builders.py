@@ -2,19 +2,20 @@ import re
 from urllib.parse import quote_plus
 
 STATE_REGISTRY_TEMPLATES = {
-    "MD": "https://egov.maryland.gov/BusinessExpress/EntitySearch/Search?searchType=N&searchTerm={name}",
-    "NY": "https://apps.dos.ny.gov/publicInquiry/EntitySearch?entityName={name}",
     "TX": "https://www.sos.state.tx.us/cgi-bin/corpus/dbcgi.exe?cmd=BSQY&DATABASE=corp&entity_name={name}",
     "NJ": "https://www.njportal.com/DOR/BusinessNameSearch/Search/BusinessName?searchTerm={name}",
-    "GA": "https://ecorp.sos.ga.gov/BusinessSearch?businessName={name}",
     "NC": "https://www.sosnc.gov/online_services/search/by_title/_Business_Registration?search_type=Business&q={name}",
-    # CA is agentic (JS SPA with click-triggered sidebar) — no direct search URL template used
 }
 
 # States whose registries require form-based or JS-click agentic scraping.
 # DE: traditional form submit. CA: JS SPA with click-triggered sidebar.
 FORM_BASED_STATES = {"DE"}
-AGENTIC_STATES = {"CA"}
+AGENTIC_STATES = {
+    "CA",
+    "NY",
+    "MD",
+    "GA",
+}
 
 # States whose registries are JS-rendered SPAs where markdownify returns empty shells
 # but a direct URL can be constructed and hit with smartscraper + render_heavy_js.
