@@ -5,13 +5,9 @@ Main orchestrator. Loads rows, runs the reconciler on each, writes results
 incrementally so progress is never lost if the pipeline crashes mid-run.
 
 Usage:
-    python -m pipeline.runner --input data/input/Palm_Beach_1.csv --output data/output/results.csv
-
-    # Single row by ID (for testing):
-    python -m pipeline.runner --input data/input/Palm_Beach_1.csv --output data/output/results.csv --id 799133
-
-    # Dry run — parse + summarize only, no scraping:
-    python -m pipeline.runner --input data/input/Palm_Beach_1.csv --output data/output/results.csv --dry-run
+    python -m pipeline.runner
+    python -m pipeline.runner --id 799133
+    python -m pipeline.runner --dry-run
 """
 import argparse
 import csv
@@ -35,6 +31,10 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger(__name__)
+
+file_root      = "Palm_Beach_1"
+DEFAULT_INPUT  = f"data/input/{file_root}.csv"
+DEFAULT_OUTPUT = f"data/output/{file_root}_resolved.csv"
 
 OUTPUT_FIELDNAMES = list(OwnerResult(property_id="", property_address="").to_csv_row().keys())
 ROW_DELAY_SECONDS = 2  # be polite to APIs between rows
@@ -69,16 +69,20 @@ def run(input_path: str, output_path: str, filter_id: str = None, dry_run: bool 
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     already_done = _load_processed_ids(out_path)
-    if already_done:
-        logger.info(f"Resuming — {len(already_done)} rows already processed, skipping.")
 
-    write_header = not out_path.exists() or not already_done
+    if already_done:
+        remaining = [r for r in rows if r.id not in already_done]
+        logger.info(
+            f"Resuming — {len(already_done)} rows already done, "
+            f"{len(remaining)} remaining. "
+            f"Next: {remaining[0].id if remaining else 'none'}"
+        )
+    
+    _ensure_header(out_path, OUTPUT_FIELDNAMES)
     summary = {"resolved": 0, "unresolved": 0, "error": 0}
 
     with open(out_path, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=OUTPUT_FIELDNAMES)
-        if write_header:
-            writer.writeheader()
 
         for i, row in enumerate(rows):
             if row.id in already_done:
@@ -97,7 +101,7 @@ def run(input_path: str, output_path: str, filter_id: str = None, dry_run: bool 
                     error=f"Unhandled exception: {e}",
                 )
 
-            # Write immediately — never buffer
+            # Write and flush immediately — never buffer
             writer.writerow(result.to_csv_row())
             f.flush()
 
@@ -115,6 +119,23 @@ def run(input_path: str, output_path: str, filter_id: str = None, dry_run: bool 
                 f"Errors: {summary['error']}")
     logger.info(f"Output: {out_path.resolve()}")
     logger.info("══════════════════════════════")
+
+
+def _ensure_header(path: Path, fieldnames: list):
+    """Write header if file is missing or has no header line yet."""
+    if not path.exists() or path.stat().st_size == 0:
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            csv.DictWriter(f, fieldnames=fieldnames).writeheader()
+        return
+    with open(path, newline="", encoding="utf-8") as f:
+        first_line = f.readline().strip()
+    if not first_line.startswith("property_id"):
+        # Prepend header to existing content
+        existing = path.read_text(encoding="utf-8")
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            f.write(existing)
 
 
 def _check_env():
@@ -158,8 +179,8 @@ def _tally(summary: dict, result: OwnerResult):
 
 def main():
     parser = argparse.ArgumentParser(description="Parking lot owner identification pipeline")
-    parser.add_argument("--input",   required=True)
-    parser.add_argument("--output",  required=True)
+    parser.add_argument("--input",   default=DEFAULT_INPUT,  help="Path to input CSV")
+    parser.add_argument("--output",  default=DEFAULT_OUTPUT, help="Path to output CSV")
     parser.add_argument("--id",      default=None,        help="Run single property ID")
     parser.add_argument("--dry-run", action="store_true", help="No scraping, just parse")
     args = parser.parse_args()

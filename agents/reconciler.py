@@ -134,7 +134,6 @@ class Reconciler:
 
         result.owner_mailing_address, result.mailing_source = self._best_mailing(
             deed_mailing=deed.mailing_address,
-            enriched_owner=row.enriched_owners[idx] if idx is not None else None,
         )
         return result
 
@@ -168,6 +167,7 @@ class Reconciler:
 
         current_state = states_visited[-1] if states_visited else "FL"
 
+        foreign_result = None
         # ── Look up the entity ────────────────────────────────────────────────
         if current_state == "FL":
             sunbiz = self.sunbiz_agent.lookup(entity_name, property_id=row.id)
@@ -182,21 +182,25 @@ class Reconciler:
                 return result
 
             # If it's a foreign LLC registered in FL, hand off to out-of-state
+            # Always run out-of-state lookup for foreign LLCs to get additional address data,
+            # even if Sunbiz already gave us person members
+            foreign_result = None
             if sunbiz.is_foreign and sunbiz.state_of_formation:
                 foreign_state = sunbiz.state_of_formation.upper()
-                logger.info(f"[{row.id}] '{entity_name}' is foreign ({foreign_state}) — routing out-of-state")
+                logger.info(f"[{row.id}] '{entity_name}' is foreign ({foreign_state}) — running out-of-state lookup")
                 states_visited = states_visited + [foreign_state]
-                return self._resolve_entity(
-                    row, result, entity_name, enriched_names,
-                    deed_mailing=deed_mailing or sunbiz.principal_address,
-                    hop=hop,  # don't increment — same entity, just different registry
-                    llc_chain=llc_chain,
-                    states_visited=states_visited,
-                )
+                foreign_result = self.outofstate_agent.lookup(entity_name, foreign_state, property_id=row.id)
 
-            person_members = sunbiz.person_members()
-            entity_members = sunbiz.entity_members()
-            principal_address = sunbiz.principal_address
+            # If Sunbiz has no person members but foreign registry does, use those
+            if not sunbiz.person_members() and foreign_result and foreign_result.person_members():
+                person_members = foreign_result.person_members()
+                entity_members = foreign_result.entity_members()
+                principal_address = foreign_result.principal_address
+            else:
+                person_members = sunbiz.person_members()
+                entity_members = sunbiz.entity_members()
+                principal_address = sunbiz.principal_address
+
 
         else:
             # Out-of-state registry lookup
@@ -251,10 +255,29 @@ class Reconciler:
                     f"(best score: {best_score}). Chain: {' -> '.join(new_chain)}."
                 )
 
+            # Capture addresses from all sources as separate columns
+            member_addr = best_member.get("address") or None
+            foreign_addr = None
+            if foreign_result:
+                # Try to find the same person in the foreign result for their address
+                for fm in (foreign_result.person_members() or []):
+                    if fm.get("name", "").upper() == owner_name.upper():
+                        foreign_addr = fm.get("address") or None
+                        break
+                # Fall back to foreign principal address if no member match
+                if not foreign_addr and foreign_result.principal_address:
+                    foreign_addr = foreign_result.principal_address
+
+            result.registry_member_address = member_addr
+            result.foreign_registry_address = foreign_addr
+
+            # Mailing priority: once we've pierced an LLC, deed mailing belongs
+            # to the entity — use member's personal address instead
             result.owner_mailing_address, result.mailing_source = self._best_mailing(
-                deed_mailing=deed_mailing,
-                enriched_owner=row.enriched_owners[best_idx] if best_idx is not None else None,
-                registry_address=principal_address or best_member.get("address"),
+                deed_mailing=None,  # intentionally excluded for LLC-pierced results
+                registry_member_address=member_addr,
+                foreign_registry_address=foreign_addr,
+                fallback_deed_mailing=deed_mailing,
             )
             return result
 
@@ -320,24 +343,26 @@ class Reconciler:
     def _best_mailing(
         self,
         deed_mailing: Optional[str] = None,
-        enriched_owner: Optional[EnrichedOwner] = None,
-        registry_address: Optional[str] = None,
+        registry_member_address: Optional[str] = None,
+        foreign_registry_address: Optional[str] = None,
+        fallback_deed_mailing: Optional[str] = None,
     ) -> tuple:
         """
-        Return (address, source) using priority:
-          deed mailing address > enriched owner's known address > registry principal address
+        Priority for LLC-pierced results:
+          1. Member's address from Sunbiz/state registry (most directly tied to the person)
+          2. Member's address from foreign registry
+          3. Deed mailing (entity's address — last resort)
+
+        For direct person deed results, deed_mailing is passed and wins immediately.
         """
         if deed_mailing and deed_mailing.strip():
             return deed_mailing.strip(), "deed"
-
-        # Enriched owner doesn't carry an address field directly in the CSV,
-        # but the property row's mailing address is the skip-trace mailing address
-        # associated with the record — use it as a secondary signal.
-        # (A future enhancement could store per-owner addresses if the data source provides them.)
-
-        if registry_address and registry_address.strip():
-            return registry_address.strip(), "registry"
-
+        if registry_member_address and registry_member_address.strip():
+            return registry_member_address.strip(), "registry_member"
+        if foreign_registry_address and foreign_registry_address.strip():
+            return foreign_registry_address.strip(), "foreign_registry"
+        if fallback_deed_mailing and fallback_deed_mailing.strip():
+            return fallback_deed_mailing.strip(), "deed_entity"
         return None, None
 
 

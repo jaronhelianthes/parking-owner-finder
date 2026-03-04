@@ -9,6 +9,7 @@ from config.settings import ANTHROPIC_API_KEY, CLAUDE_MODEL, CLAUDE_MAX_TOKENS
 from models.property_row import PropertyRow
 from scrapers.scrapegraph_client import ScrapeGraphClient
 from utils.url_builders import pbcpa_search_url
+from utils.parse_utils import extract_json
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +101,7 @@ class DeedAgent:
                 model=CLAUDE_MODEL, max_tokens=512,
                 messages=[{"role": "user", "content": prompt}]
             )
-            parsed = json.loads(resp.content[0].text.strip())
+            parsed = extract_json(resp.content[0].text)
             owner = parsed.get("owner_name") or None
             if owner and _is_ui_noise(owner):
                 owner = None
@@ -152,7 +153,7 @@ Raw output:
                 model=CLAUDE_MODEL, max_tokens=512,
                 messages=[{"role": "user", "content": prompt}]
             )
-            parsed = json.loads(resp.content[0].text.strip())
+            parsed = extract_json(resp.content[0].text)
             owner = parsed.get("owner_name") or None
             if owner and _is_ui_noise(owner):
                 owner = None

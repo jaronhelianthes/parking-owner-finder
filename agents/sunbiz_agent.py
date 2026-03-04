@@ -6,6 +6,7 @@ import anthropic
 from config.settings import ANTHROPIC_API_KEY, CLAUDE_MODEL, CLAUDE_MAX_TOKENS
 from scrapers.scrapegraph_client import ScrapeGraphClient
 from utils.url_builders import sunbiz_search_url
+from utils.parse_utils import extract_json
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,7 @@ Markdown:\n{search_md[:6000]}"""
         try:
             resp = self.claude.messages.create(model=CLAUDE_MODEL, max_tokens=256,
                 messages=[{"role":"user","content":prompt}])
-            return json.loads(resp.content[0].text.strip()).get("detail_url")
+            return extract_json(resp.content[0].text).get("detail_url")
         except Exception as e:
             logger.warning(f"[{property_id}] Sunbiz detail URL failed: {e}"); return None
 
@@ -74,7 +75,7 @@ Markdown:\n{detail_md[:8000]}"""
         try:
             resp = self.claude.messages.create(model=CLAUDE_MODEL, max_tokens=CLAUDE_MAX_TOKENS,
                 messages=[{"role":"user","content":prompt}])
-            p = json.loads(resp.content[0].text.strip())
+            p = extract_json(resp.content[0].text)
             return SunbizResult(entity_name=p.get("entity_name", entity_name),
                                 state_of_formation=p.get("state_of_formation"),
                                 managing_members=p.get("managing_members", []),
@@ -105,7 +106,7 @@ Markdown:\n{detail_md[:8000]}"""
                 model=CLAUDE_MODEL, max_tokens=CLAUDE_MAX_TOKENS,
                 messages=[{"role": "user", "content": extract_prompt}]
             )
-            p = json.loads(resp.content[0].text.strip())
+            p = extract_json(resp.content[0].text)
             return SunbizResult(
                 entity_name=p.get("entity_name", entity_name),
                 state_of_formation=p.get("state_of_formation"),

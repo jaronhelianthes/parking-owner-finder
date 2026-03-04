@@ -10,10 +10,15 @@ STATE_REGISTRY_TEMPLATES = {
     "NC": "https://www.sosnc.gov/online_services/search/by_title/_Business_Registration?search_type=Business&q={name}",
     "CA": "https://bizfileonline.sos.ca.gov/search/business?BusinessName={name}",
 }
+
+# States whose registries are JS-rendered SPAs — markdownify returns empty shells.
+# Use smartscraper + render_heavy_js=True for these.
+SMARTSCRAPER_STATES = {"CA"}
+
 FORM_BASED_STATES = {"DE"}
 
+
 def pbcpa_search_url(street: str) -> str:
-    from urllib.parse import quote_plus
     return f"https://pbcpao.gov/MasterSearch/SearchResults?propertyType=RE&searchvalue={quote_plus(street)}"
 
 def sunbiz_search_url(entity_name: str) -> str:

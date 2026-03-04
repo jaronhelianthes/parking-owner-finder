@@ -4,23 +4,24 @@
 quick_test.py
 
 Runs the full pipeline on a single row and prints verbose output at every step.
-Useful for validating that scraping, parsing, and reconciliation all work
-before committing API credits to the full 35-row run.
+Results are written to the output CSV so the run counts toward the full pipeline.
 
 Usage:
-    python quick_test.py                    # uses default row ID 799133
-    python quick_test.py --id 799134        # LLC row
-    python quick_test.py --id 799152        # complex LLC row
-    python quick_test.py --step deed        # only run deed lookup, stop there
+    python quick_test.py                    # runs next unresolved row (default)
+    python quick_test.py --next             # same as above
+    python quick_test.py --id 799134        # run a specific row
+    python quick_test.py --step deed
     python quick_test.py --step sunbiz --entity "Cohen West Palm Beach Commercial Llc"
+    python quick_test.py --step outofstate --entity "Some LLC" --state CA
 """
 import argparse
+import csv
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
-# Make sure project root is on the path when running from project directory
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config.settings import ANTHROPIC_API_KEY, SGAI_API_KEY
@@ -32,52 +33,52 @@ from agents.outofstate_agent import OutOfStateAgent
 from agents.reconciler import Reconciler
 
 logging.basicConfig(
-    level=logging.DEBUG,   # verbose — shows every scrape call
+    level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger("quick_test")
 
-DEFAULT_ROW_ID = "799133"
+file_root      = "Palm_Beach_1"
 DEFAULT_INPUT  = "data/input/Palm_Beach_1.csv"
+DEFAULT_OUTPUT = "data/output/results.csv"
 
 
 def main():
     parser = argparse.ArgumentParser(description="Quick single-row pipeline test")
-    parser.add_argument("--id",     default=DEFAULT_ROW_ID, help="Property ID to test")
-    parser.add_argument("--input",  default=DEFAULT_INPUT,  help="Path to input CSV")
+    parser.add_argument("--id",     default=None,          help="Property ID to test")
+    parser.add_argument("--input",  default=DEFAULT_INPUT, help="Path to input CSV")
+    parser.add_argument("--output", default=DEFAULT_OUTPUT,help="Path to output CSV")
+    parser.add_argument("--next",   action="store_true",   help="Run next unresolved row")
     parser.add_argument("--step",   default="full",
                         choices=["full", "deed", "sunbiz", "outofstate"],
                         help="Which step to run in isolation")
     parser.add_argument("--entity", default=None,
                         help="Entity name for --step sunbiz or --step outofstate")
     parser.add_argument("--state",  default="FL",
-                        help="State code for --step outofstate (e.g. MD)")
+                        help="State code for --step outofstate (e.g. CA)")
     args = parser.parse_args()
+
+    # Default to --next behavior when neither flag is provided
+    if not args.next and args.id is None:
+        args.next = True
 
     _check_env()
 
     scraper = ScrapeGraphClient()
-
     try:
         if args.step == "deed":
             _test_deed(scraper, args)
-
         elif args.step == "sunbiz":
             if not args.entity:
-                print("ERROR: --entity required for --step sunbiz")
-                sys.exit(1)
+                print("ERROR: --entity required for --step sunbiz"); sys.exit(1)
             _test_sunbiz(scraper, args)
-
         elif args.step == "outofstate":
             if not args.entity:
-                print("ERROR: --entity required for --step outofstate")
-                sys.exit(1)
+                print("ERROR: --entity required for --step outofstate"); sys.exit(1)
             _test_outofstate(scraper, args)
-
         else:
             _test_full(scraper, args)
-
     finally:
         scraper.close()
 
@@ -90,8 +91,7 @@ def _test_deed(scraper, args):
     print(f"  Property : {row.full_address}")
     print(f"  Owner type: {row.owner_type}")
 
-    agent = DeedAgent(scraper)
-    result = agent.lookup(row)
+    result = DeedAgent(scraper).lookup(row)
 
     print_section("DEED RESULT")
     print(f"  Success        : {result.success}")
@@ -109,8 +109,7 @@ def _test_sunbiz(scraper, args):
     print_section("SUNBIZ LOOKUP")
     print(f"  Entity: {args.entity}")
 
-    agent = SunbizAgent(scraper)
-    result = agent.lookup(args.entity, property_id="quick_test")
+    result = SunbizAgent(scraper).lookup(args.entity, property_id="quick_test")
 
     print_section("SUNBIZ RESULT")
     print(f"  Success            : {result.success}")
@@ -132,8 +131,7 @@ def _test_outofstate(scraper, args):
     print(f"  Entity : {args.entity}")
     print(f"  State  : {args.state}")
 
-    agent = OutOfStateAgent(scraper)
-    result = agent.lookup(args.entity, args.state, property_id="quick_test")
+    result = OutOfStateAgent(scraper).lookup(args.entity, args.state, property_id="quick_test")
 
     print_section("OUT-OF-STATE RESULT")
     print(f"  Success           : {result.success}")
@@ -194,28 +192,82 @@ def _test_full(scraper, args):
     for k, v in row_dict.items():
         print(f"  {k:<28}: {v}")
 
+    _write_result(row_dict, args.output)
+
+
+# ── CSV writer ────────────────────────────────────────────────────────────────
+
+def _ensure_header(output_path: str, fieldnames: list):
+    """Write header if file is missing or has no header line yet."""
+    path = Path(output_path)
+    if not path.exists() or path.stat().st_size == 0:
+        with open(path, "w", newline="") as f:
+            csv.DictWriter(f, fieldnames=fieldnames).writeheader()
+        return
+    with open(path, newline="") as f:
+        first_line = f.readline().strip()
+    if not first_line.startswith("property_id"):
+        existing = path.read_text()
+        with open(path, "w", newline="") as f:
+            csv.DictWriter(f, fieldnames=fieldnames).writeheader()
+            f.write(existing)
+
+
+def _write_result(row_dict: dict, output_path: str):
+    """Append result to output CSV. Skips if property_id already present."""
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    pid = str(row_dict.get("property_id", ""))
+    fieldnames = list(row_dict.keys())
+
+    _ensure_header(output_path, fieldnames)
+
+    with open(output_path, newline="") as f:
+        existing_ids = {r.get("property_id") for r in csv.DictReader(f)}
+    if pid in existing_ids:
+        print(f"\n[quick_test] Row {pid} already in {output_path} — not overwriting.")
+        return
+
+    with open(output_path, "a", newline="") as f:
+        csv.DictWriter(f, fieldnames=fieldnames).writerow(row_dict)
+
+    print(f"\n[quick_test] Result written to {output_path}")
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _get_row(args):
-    rows = load_rows(args.input)
-    matches = [r for r in rows if r.id == args.id]
+    all_rows = load_rows(args.input)
+
+    if args.next:
+        done_ids = _get_done_ids(args.output)
+        row = next((r for r in all_rows if str(r.id) not in done_ids), None)
+        if row is None:
+            print("All rows resolved — nothing left to process.")
+            sys.exit(0)
+        print(f"[quick_test] Next unresolved row: {row.id}")
+        return row
+
+    matches = [r for r in all_rows if r.id == args.id]
     if not matches:
         print(f"ERROR: No row with ID={args.id} in {args.input}")
-        print(f"Available IDs: {[r.id for r in rows]}")
+        print(f"Available IDs: {[r.id for r in all_rows]}")
         sys.exit(1)
     return matches[0]
 
 
+def _get_done_ids(output_path: str) -> set:
+    if not os.path.exists(output_path):
+        return set()
+    with open(output_path, newline="") as f:
+        return {row.get("property_id") for row in csv.DictReader(f)}
+
+
 def _check_env():
     missing = []
-    if not ANTHROPIC_API_KEY:
-        missing.append("ANTHROPIC_API_KEY")
-    if not SGAI_API_KEY:
-        missing.append("SGAI_API_KEY")
+    if not ANTHROPIC_API_KEY: missing.append("ANTHROPIC_API_KEY")
+    if not SGAI_API_KEY:       missing.append("SGAI_API_KEY")
     if missing:
         print(f"ERROR: Missing environment variables: {', '.join(missing)}")
-        print("Make sure your .env file is populated.")
         sys.exit(1)
 
 

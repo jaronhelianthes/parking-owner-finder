@@ -42,6 +42,8 @@ class OwnerResult:
     # --- Raw deed info ---
     deed_owner_raw: Optional[str] = None
     deed_mailing_address: Optional[str] = None
+    registry_member_address: Optional[str] = None
+    foreign_registry_address: Optional[str] = None
 
     # --- LLC chain trace ---
     llc_chain: list = field(default_factory=list)   # e.g. ["Cohen WPB LLC", "David Cohen"]
@@ -66,6 +68,8 @@ class OwnerResult:
             "resolution_source": self.resolution_source.value,
             "deed_owner_raw": self.deed_owner_raw or "",
             "deed_mailing_address": self.deed_mailing_address or "",
+            "registry_member_address": self.registry_member_address or "",
+            "foreign_registry_address": self.foreign_registry_address or "",
             "llc_chain": " -> ".join(self.llc_chain),
             "states_visited": ", ".join(self.states_visited),
             "reasoning": self.reasoning,
