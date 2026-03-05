@@ -142,8 +142,8 @@ def _log_result(result: OwnerResult):
     else:
         logger.info(
             f"[{result.property_id}] {result.confidence.value.upper()} | "
-            f"{result.resolution_source.value} | "
-            f"owner_found_via: {result.owner_found_via or 'n/a'} | "
+            f"{result.resolution_path or 'n/a'} | "
+            f"enriched_confirmed: {result.enriched_confirmed} | "
             f"Owner: {result.owner_name or 'n/a'} | "
             f"Enriched slot: {result.matched_enriched_slot or 'n/a'}"
         )

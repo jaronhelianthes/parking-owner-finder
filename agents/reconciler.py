@@ -36,6 +36,7 @@ from agents.sunbiz_agent import SunbizAgent
 from agents.outofstate_agent import OutOfStateAgent
 from utils.name_utils import is_entity_name, match_name_to_enriched
 from utils.agent_mills import is_agent_mill
+from utils.name_utils import is_government_entity
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,20 @@ class Reconciler:
 
         result.deed_owner_raw = deed.owner_name
         result.deed_mailing_address = deed.mailing_address
+
+        # ── Government entity short-circuit ───────────────────────────────────
+        if is_government_entity(deed.owner_name):
+            logger.info(f"[{row.id}] '{deed.owner_name}' is a government entity — skipping")
+            result.confidence = Confidence.UNRESOLVED
+            result.resolution_path = "unresolved: government owned"
+            result.reasoning = (
+                f"Deed owner '{deed.owner_name}' appears to be a government or public agency. "
+                f"No private beneficial owner to identify."
+            )
+            result.owner_mailing_address, result.mailing_source = self._best_mailing(
+                deed_mailing=deed.mailing_address,
+            )
+            return result
 
         enriched_names = [o.name for o in row.enriched_owners]
 
