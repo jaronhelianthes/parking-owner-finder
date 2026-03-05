@@ -90,7 +90,9 @@ class DeedAgent:
     def _parse_smartscraper_result(self, row: PropertyRow, raw_text: str) -> DeedResult:
         prompt = f"""Extract property ownership info from this text.
 
-    Return ONLY valid JSON with keys: "owner_name", "mailing_address", "parcel_id" (all string or null).
+    If there are multiple properties listed, return a JSON array of objects.
+    If there is only one property, return a single JSON object.
+    Each object must have keys: "owner_name", "mailing_address", "parcel_id" (all string or null).
     No explanation, no code fences.
 
     Text:
@@ -98,10 +100,20 @@ class DeedAgent:
     """
         try:
             resp = self.claude.messages.create(
-                model=CLAUDE_MODEL, max_tokens=512,
+                model=CLAUDE_MODEL, max_tokens=1024,
                 messages=[{"role": "user", "content": prompt}]
             )
             parsed = extract_json(resp.content[0].text)
+
+            # Handle array response — multiple units returned for same street
+            if isinstance(parsed, list):
+                parsed = _pick_best_unit(parsed, row)
+                if parsed is None:
+                    return DeedResult(
+                        method_used="smartscraper",
+                        error="Multiple units returned and could not match to suite",
+                    )
+
             owner = parsed.get("owner_name") or None
             if owner and _is_ui_noise(owner):
                 owner = None
@@ -174,3 +186,34 @@ Raw output:
 def _is_ui_noise(value: str) -> bool:
     cleaned = value.strip().lower()
     return len(cleaned) < 3 or cleaned in UI_NOISE
+
+def _pick_best_unit(results: list, row: PropertyRow) -> Optional[dict]:
+    """
+    When PBCPA returns multiple units for the same street, try to find the one
+    matching the suite/unit on the input row. Falls back to the first result
+    if no suite is specified (single-building ownership case).
+    """
+    if not results:
+        return None
+
+    # No suite on the row — can't disambiguate, return first
+    if not row.suite:
+        logger.warning(
+            f"[{row.id}] Multiple deed results returned but no suite on row — using first"
+        )
+        return results[0]
+
+    suite_normalized = row.suite.upper().replace("APT", "").replace("UNIT", "").replace("#", "").strip()
+
+    for result in results:
+        owner = (result.get("owner_name") or "").upper()
+        mailing = (result.get("mailing_address") or "").upper()
+        parcel = (result.get("parcel_id") or "").upper()
+        if suite_normalized in owner or suite_normalized in mailing or suite_normalized in parcel:
+            logger.info(f"[{row.id}] Matched suite '{row.suite}' to result: {result.get('owner_name')}")
+            return result
+
+    logger.warning(
+        f"[{row.id}] Could not match suite '{row.suite}' among {len(results)} results — using first"
+    )
+    return results[0]
