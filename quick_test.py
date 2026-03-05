@@ -13,10 +13,8 @@ Usage:
     python quick_test.py --step outofstate --entity "Some LLC" --state CA
 """
 import argparse
-import csv
 import json
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -24,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from config.settings import ANTHROPIC_API_KEY, SGAI_API_KEY
 from pipeline.preprocessor import load_rows
+from pipeline.output_writer import write_result, load_processed_ids
 from scrapers.scrapegraph_client import ScrapeGraphClient
 from agents.deed_agent import DeedAgent
 from agents.sunbiz_agent import SunbizAgent
@@ -35,10 +34,16 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
+
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("anthropic._base_client").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+
 logger = logging.getLogger("quick_test")
 
-file_root     = "Palm_Beach_1"
-DEFAULT_INPUT = "data/input/Palm_Beach_1.csv"
+DEFAULT_INPUT  = "data/input/Palm_Beach_1.csv"
+DEFAULT_OUTPUT = "data/output/Palm_Beach_1_augmented.csv"
 
 
 def _default_output(input_path: str) -> str:
@@ -50,7 +55,7 @@ def main():
     parser = argparse.ArgumentParser(description="Quick single-row pipeline test")
     parser.add_argument("--id",     default=None,          help="Property ID to test")
     parser.add_argument("--input",  default=DEFAULT_INPUT, help="Path to input CSV")
-    parser.add_argument("--output", default=None,          help="Path to output CSV (default: <input_stem>_augmented.csv)")
+    parser.add_argument("--output", default=None,          help="Path to output CSV")
     parser.add_argument("--next",   action="store_true",   help="Run next unresolved row")
     parser.add_argument("--step",   default="full",
                         choices=["full", "deed", "sunbiz", "outofstate"],
@@ -63,7 +68,6 @@ def main():
 
     if not args.next and args.id is None:
         args.next = True
-
     if args.output is None:
         args.output = _default_output(args.input)
 
@@ -183,6 +187,7 @@ def _test_full(scraper, args):
     print(f"  Owner name          : {result.owner_name}")
     print(f"  Mailing address     : {result.owner_mailing_address}")
     print(f"  Mailing source      : {result.mailing_source}")
+    print(f"  Owner found via     : {result.owner_found_via}")
     print(f"  Confidence          : {result.confidence.value}")
     print(f"  Resolution source   : {result.resolution_source.value}")
     print(f"  Matched slot        : {result.matched_enriched_slot}")
@@ -193,6 +198,7 @@ def _test_full(scraper, args):
     print(f"  Foreign registry    : {result.foreign_registry_address}")
     print(f"  Agent name          : {result.agent_name}")
     print(f"  Agent address       : {result.agent_address}")
+    print(f"  Is agent mill       : {result.is_agent_mill}")
     print(f"  LLC chain           : {' -> '.join(result.llc_chain) or 'n/a'}")
     print(f"  States visited      : {', '.join(result.states_visited) or 'n/a'}")
     print(f"  Reasoning           : {result.reasoning}")
@@ -203,43 +209,11 @@ def _test_full(scraper, args):
     for k, v in row_dict.items():
         print(f"  {k:<28}: {v}")
 
-    _write_result(row_dict, args.output)
-
-
-# ── CSV writer ────────────────────────────────────────────────────────────────
-
-def _ensure_header(output_path: str, fieldnames: list):
-    path = Path(output_path)
-    if not path.exists() or path.stat().st_size == 0:
-        with open(path, "w", newline="") as f:
-            csv.DictWriter(f, fieldnames=fieldnames).writeheader()
-        return
-    with open(path, newline="") as f:
-        first_line = f.readline().strip()
-    if not first_line.startswith("property_id"):
-        existing = path.read_text()
-        with open(path, "w", newline="") as f:
-            csv.DictWriter(f, fieldnames=fieldnames).writeheader()
-            f.write(existing)
-
-
-def _write_result(row_dict: dict, output_path: str):
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    pid = str(row_dict.get("property_id", ""))
-    fieldnames = list(row_dict.keys())
-
-    _ensure_header(output_path, fieldnames)
-
-    with open(output_path, newline="") as f:
-        existing_ids = {r.get("property_id") for r in csv.DictReader(f)}
-    if pid in existing_ids:
-        print(f"\n[quick_test] Row {pid} already in {output_path} — not overwriting.")
-        return
-
-    with open(output_path, "a", newline="") as f:
-        csv.DictWriter(f, fieldnames=fieldnames).writerow(row_dict)
-
-    print(f"\n[quick_test] Result written to {output_path}")
+    written = write_result(row_dict, args.output)
+    if written:
+        print(f"\n[quick_test] Result written to {args.output}")
+    else:
+        print(f"\n[quick_test] Row {row.id} already in {args.output} — not overwriting.")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -248,7 +222,7 @@ def _get_row(args):
     all_rows = load_rows(args.input)
 
     if args.next:
-        done_ids = _get_done_ids(args.output)
+        done_ids = load_processed_ids(args.output)
         row = next((r for r in all_rows if str(r.id) not in done_ids), None)
         if row is None:
             print("All rows resolved — nothing left to process.")
@@ -262,13 +236,6 @@ def _get_row(args):
         print(f"Available IDs: {[r.id for r in all_rows]}")
         sys.exit(1)
     return matches[0]
-
-
-def _get_done_ids(output_path: str) -> set:
-    if not os.path.exists(output_path):
-        return set()
-    with open(output_path, newline="") as f:
-        return {row.get("property_id") for row in csv.DictReader(f)}
 
 
 def _check_env():

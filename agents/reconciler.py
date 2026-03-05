@@ -1,5 +1,3 @@
-# agents/reconciler.py
-
 """
 agents/reconciler.py
 
@@ -10,19 +8,20 @@ the most likely true owner.
 Logic flow:
   1. If deed owner is a natural person:
        - fuzzy match against enriched list
-       - if match found -> HIGH confidence, DEED_DIRECT
-       - if no match   -> MEDIUM confidence, DEED_NEW (real person, just not in list)
+       - if match found -> HIGH confidence
+       - if no match   -> MEDIUM confidence (real person, just not in list)
 
   2. If deed owner is an entity (LLC etc.):
        - run Sunbiz lookup to get managing members
+       - if Sunbiz already has person members -> use them directly, skip out-of-state
+       - if Sunbiz has NO person members AND entity is foreign -> run out-of-state lookup
        - for each person member: fuzzy match against enriched list
-       - if match found -> MEDIUM confidence, LLC_1HOP
-       - if no match   -> still use the person, MEDIUM confidence
+       - if match found -> HIGH/MEDIUM confidence, enriched_confirmed=True
+       - if no match but verified via registry -> MEDIUM confidence, enriched_confirmed=False
        - if managing member is ALSO an entity -> recurse (up to MAX_LLC_HOPS)
-       - if Sunbiz says foreign entity -> hand off to OutOfStateAgent
 
   3. Mailing address priority:
-       deed mailing address > matched enriched owner address > registry principal address
+       deed mailing address > registry member address > foreign registry address > deed entity mailing
 
   4. If hop cap reached or all lookups fail -> UNRESOLVED, flag for manual review
 """
@@ -31,13 +30,19 @@ from typing import Optional
 
 from config.settings import MAX_LLC_HOPS, FUZZY_MATCH_THRESHOLD
 from models.property_row import PropertyRow, EnrichedOwner
-from models.owner_result import OwnerResult, Confidence, ResolutionSource
+from models.owner_result import OwnerResult, Confidence
 from agents.deed_agent import DeedAgent, DeedResult
 from agents.sunbiz_agent import SunbizAgent
 from agents.outofstate_agent import OutOfStateAgent
 from utils.name_utils import is_entity_name, match_name_to_enriched
+from utils.agent_mills import is_agent_mill
 
 logger = logging.getLogger(__name__)
+
+
+def _build_path(*steps) -> str:
+    """Join resolution steps into a narrative path string."""
+    return " → ".join(steps)
 
 
 class Reconciler:
@@ -60,7 +65,7 @@ class Reconciler:
         if row.is_sparse:
             logger.info(f"[{row.id}] Sparse row — skipping scraping")
             result.confidence = Confidence.UNRESOLVED
-            result.resolution_source = ResolutionSource.UNRESOLVED_SPARSE
+            result.resolution_path = "unresolved: sparse row"
             result.reasoning = "No enriched owners in source data and no deed lookup attempted."
             return result
 
@@ -68,7 +73,7 @@ class Reconciler:
 
         if not deed.success:
             result.confidence = Confidence.UNRESOLVED
-            result.resolution_source = ResolutionSource.UNRESOLVED_SCRAPE_FAIL
+            result.resolution_path = "unresolved: scrape failure"
             result.error = deed.error
             result.reasoning = f"Deed lookup failed: {deed.error}"
             return result
@@ -87,6 +92,7 @@ class Reconciler:
                 hop=1,
                 llc_chain=[deed.owner_name],
                 states_visited=["FL"],
+                path_steps=["deed"],
             )
 
     # ── Person resolution ─────────────────────────────────────────────────────
@@ -99,18 +105,20 @@ class Reconciler:
         )
 
         result.owner_name = deed.owner_name
-        result.resolution_source = ResolutionSource.DEED_DIRECT if idx is not None else ResolutionSource.DEED_NEW
         result.confidence = Confidence.HIGH if idx is not None else Confidence.MEDIUM
+        result.enriched_confirmed = idx is not None
 
         if idx is not None:
             matched_owner = row.enriched_owners[idx]
             result.matched_enriched_slot = matched_owner.slot
             result.matched_enriched_name = matched_name
+            result.resolution_path = _build_path("deed", "person")
             result.reasoning = (
                 f"Deed owner '{deed.owner_name}' matched enriched owner {matched_owner.slot} "
                 f"'{matched_name}' with fuzzy score {score}."
             )
         else:
+            result.resolution_path = _build_path("deed", "person (not in enriched list)")
             result.reasoning = (
                 f"Deed owner '{deed.owner_name}' is a natural person but does not appear "
                 f"in the skip-traced list (best fuzzy score: {score}). Added as new candidate."
@@ -133,11 +141,12 @@ class Reconciler:
         hop: int,
         llc_chain: list,
         states_visited: list,
+        path_steps: list,
     ) -> OwnerResult:
         if hop > MAX_LLC_HOPS:
             logger.warning(f"[{row.id}] Hit LLC hop cap ({MAX_LLC_HOPS}) on '{entity_name}'")
             result.confidence = Confidence.UNRESOLVED
-            result.resolution_source = ResolutionSource.UNRESOLVED_HOP_CAP
+            result.resolution_path = "unresolved: hop cap reached"
             result.llc_chain = llc_chain
             result.states_visited = states_visited
             result.reasoning = (
@@ -154,34 +163,48 @@ class Reconciler:
 
             if not sunbiz.success:
                 result.confidence = Confidence.UNRESOLVED
-                result.resolution_source = ResolutionSource.UNRESOLVED_SCRAPE_FAIL
+                result.resolution_path = "unresolved: scrape failure"
                 result.llc_chain = llc_chain
                 result.states_visited = states_visited
                 result.error = sunbiz.error
                 result.reasoning = f"Sunbiz lookup failed for '{entity_name}': {sunbiz.error}"
                 return result
 
-            if sunbiz.is_foreign and sunbiz.state_of_formation:
+            if sunbiz.is_foreign and sunbiz.state_of_formation and not sunbiz.person_members():
                 foreign_state = sunbiz.state_of_formation.upper()
-                logger.info(f"[{row.id}] '{entity_name}' is foreign ({foreign_state}) — running out-of-state lookup")
+                logger.info(
+                    f"[{row.id}] '{entity_name}' is foreign ({foreign_state}) and has no FL person members "
+                    f"— running out-of-state lookup"
+                )
                 states_visited = states_visited + [foreign_state]
                 foreign_result = self.outofstate_agent.lookup(entity_name, foreign_state, property_id=row.id)
+            elif sunbiz.is_foreign and sunbiz.state_of_formation:
+                foreign_state = sunbiz.state_of_formation.upper()
+                logger.info(
+                    f"[{row.id}] '{entity_name}' is foreign ({foreign_state}) but Sunbiz already has "
+                    f"person members — skipping out-of-state lookup"
+                )
+                states_visited = states_visited + [foreign_state]
 
             if not sunbiz.person_members() and foreign_result and foreign_result.person_members():
                 person_members = foreign_result.person_members()
                 entity_members = foreign_result.entity_members()
                 principal_address = foreign_result.principal_address
+                registry_label = f"{foreign_state.upper()} registry"
+                member_label = f"{foreign_state.upper()} registry member"
             else:
                 person_members = sunbiz.person_members()
                 entity_members = sunbiz.entity_members()
                 principal_address = sunbiz.principal_address
+                registry_label = "FL LLC"
+                member_label = "sunbiz member"
 
         else:
             oos = self.outofstate_agent.lookup(entity_name, current_state, property_id=row.id)
 
             if not oos.success:
                 result.confidence = Confidence.UNRESOLVED
-                result.resolution_source = ResolutionSource.UNRESOLVED_SCRAPE_FAIL
+                result.resolution_path = "unresolved: scrape failure"
                 result.llc_chain = llc_chain
                 result.states_visited = states_visited
                 result.error = oos.error
@@ -191,8 +214,23 @@ class Reconciler:
             person_members = oos.person_members()
             entity_members = oos.entity_members()
             principal_address = oos.principal_address
-            # Capture agent info from direct out-of-state lookup
+            registry_label = f"{current_state} LLC"
+            member_label = f"{current_state} registry member"
             foreign_result = oos
+
+        # ── Populate agent info whenever we have a foreign result ─────────────
+        if foreign_result:
+            agent_name = foreign_result.agent_name or None
+            agent_address = foreign_result.agent_address or None
+            result.agent_name = agent_name
+            result.agent_address = agent_address
+            if agent_name and is_agent_mill(agent_name):
+                result.is_agent_mill = True
+                logger.info(
+                    f"[{row.id}] Registered agent '{agent_name}' is a known RA mill"
+                )
+
+        current_path_steps = path_steps + [registry_label]
 
         if person_members:
             best_idx, best_enriched_name, best_score, best_member = self._best_person_match(
@@ -205,29 +243,34 @@ class Reconciler:
             result.owner_name = owner_name
             result.llc_chain = new_chain
             result.states_visited = states_visited
-            result.resolution_source = (
-                ResolutionSource.LLC_1HOP if hop == 1
-                else ResolutionSource.LLC_MULTIHOP if current_state == "FL"
-                else ResolutionSource.OUT_OF_STATE
-            )
 
             if best_idx is not None:
                 matched_owner = row.enriched_owners[best_idx]
                 result.matched_enriched_slot = matched_owner.slot
                 result.matched_enriched_name = best_enriched_name
-                result.confidence = Confidence.MEDIUM
+                result.enriched_confirmed = True
+                result.confidence = Confidence.HIGH if best_score == 100 else Confidence.MEDIUM
+                result.resolution_path = _build_path(*current_path_steps, member_label)
                 result.reasoning = (
                     f"'{entity_name}' (hop {hop}) has managing member '{owner_name}', "
                     f"which matched enriched owner {matched_owner.slot} '{best_enriched_name}' "
                     f"(fuzzy score {best_score}). Chain: {' -> '.join(new_chain)}."
                 )
             else:
-                result.confidence = Confidence.LOW
+                result.enriched_confirmed = False
+                result.confidence = Confidence.MEDIUM
+                result.resolution_path = _build_path(*current_path_steps, member_label)
                 result.reasoning = (
-                    f"'{entity_name}' (hop {hop}) has managing member '{owner_name}', "
-                    f"but this person was not found in the skip-traced list "
-                    f"(best score: {best_score}). Chain: {' -> '.join(new_chain)}."
+                    f"'{entity_name}' (hop {hop}) has managing member '{owner_name}' "
+                    f"verified via {member_label}. "
+                    f"Not found in skip-traced list (best score: {best_score}). "
+                    f"Chain: {' -> '.join(new_chain)}."
                 )
+                if result.is_agent_mill:
+                    result.reasoning += (
+                        f" Note: registered agent '{result.agent_name}' is a known RA service "
+                        f"and provides no beneficial owner information."
+                    )
 
             member_addr = best_member.get("address") or None
             foreign_addr = None
@@ -243,11 +286,6 @@ class Reconciler:
             result.registry_member_address = member_addr
             result.foreign_registry_address = foreign_addr
 
-            # Registered agent from foreign registry
-            if foreign_result:
-                result.agent_name = foreign_result.agent_name or None
-                result.agent_address = foreign_result.agent_address or None
-
             result.owner_mailing_address, result.mailing_source = self._best_mailing(
                 deed_mailing=None,
                 registry_member_address=member_addr,
@@ -256,16 +294,19 @@ class Reconciler:
             )
             return result
 
-        # ── No person members — but we may still have agent info worth saving ─
-        # Store agent info even when we can't resolve to a person, so the CSV
-        # captures whatever the foreign registry returned.
-        if foreign_result:
-            result.agent_name = foreign_result.agent_name or None
-            result.agent_address = foreign_result.agent_address or None
-
+        # ── No person members ─────────────────────────────────────────────────
         if entity_members:
             next_entity = entity_members[0]["name"]
-            logger.info(f"[{row.id}] No person members in '{entity_name}', following to '{next_entity}' (hop {hop+1})")
+            if result.is_agent_mill:
+                logger.info(
+                    f"[{row.id}] RA mill '{result.agent_name}' as registered agent, "
+                    f"no person members — following entity member '{next_entity}' (hop {hop+1})"
+                )
+            else:
+                logger.info(
+                    f"[{row.id}] No person members in '{entity_name}', "
+                    f"following to '{next_entity}' (hop {hop+1})"
+                )
             new_chain = llc_chain + [next_entity]
             next_state = _infer_entity_state(entity_members[0])
             new_states = states_visited + ([next_state] if next_state and next_state != current_state else [])
@@ -275,10 +316,11 @@ class Reconciler:
                 hop=hop + 1,
                 llc_chain=new_chain,
                 states_visited=new_states,
+                path_steps=current_path_steps,
             )
 
         result.confidence = Confidence.UNRESOLVED
-        result.resolution_source = ResolutionSource.UNRESOLVED_SCRAPE_FAIL
+        result.resolution_path = "unresolved: no members found"
         result.llc_chain = llc_chain
         result.states_visited = states_visited
         result.reasoning = (
