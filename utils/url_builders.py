@@ -4,17 +4,18 @@ from urllib.parse import quote_plus
 STATE_REGISTRY_TEMPLATES = {
     "TX": "https://www.sos.state.tx.us/cgi-bin/corpus/dbcgi.exe?cmd=BSQY&DATABASE=corp&entity_name={name}",
     "NJ": "https://www.njportal.com/DOR/BusinessNameSearch/Search/BusinessName?searchTerm={name}",
-    "NC": "https://www.sosnc.gov/online_services/search/by_title/_Business_Registration?search_type=Business&q={name}",
 }
 
 # States whose registries require form-based or JS-click agentic scraping.
 # DE: traditional form submit. CA: JS SPA with click-triggered sidebar.
-FORM_BASED_STATES = {"DE"}
+FORM_BASED_STATES = {}
 AGENTIC_STATES = {
     "CA",
     "NY",
     "MD",
     "GA",
+    "NC",
+    "DE",
 }
 
 # States whose registries are JS-rendered SPAs where markdownify returns empty shells

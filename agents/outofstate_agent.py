@@ -4,14 +4,13 @@ OutOfStateAgent — thin dispatcher.
 
 Routing logic:
   - AGENTIC_STATES  → per-state agent module in agents/states/
-  - FORM_BASED_STATES → per-state agent module in agents/states/ (DE)
   - supports_direct_url → _lookup_markdownify or _lookup_smartscraper
   - everything else → _lookup_via_search (web search fallback)
 
 To add a new state:
   1. Create agents/states/<xx>_agent.py with a lookup(entity_name, property_id, scraper) function
-  2. Add the state code to the appropriate routing set in url_builders.py
-  3. Add an import and branch in _lookup_agentic() or _lookup_form_based() below
+  2. Add the state code to AGENTIC_STATES in url_builders.py
+  3. Add an import and branch in _lookup_agentic() below
 """
 
 import logging
@@ -21,13 +20,13 @@ from config.settings import ANTHROPIC_API_KEY, CLAUDE_MODEL, CLAUDE_MAX_TOKENS
 from scrapers.scrapegraph_client import ScrapeGraphClient
 from utils.url_builders import (
     state_registry_url, supports_direct_url,
-    FORM_BASED_STATES, AGENTIC_STATES, SMARTSCRAPER_STATES,
+    AGENTIC_STATES, SMARTSCRAPER_STATES,
 )
 from utils.parse_utils import extract_json
 from agents.outofstate_result import OutOfStateResult
 
 # Per-state agent modules
-from agents.states import ca_agent, ny_agent, md_agent, ga_agent
+from agents.states import ca_agent, ny_agent, md_agent, ga_agent, nc_agent, de_agent
 
 logger = logging.getLogger(__name__)
 
@@ -43,63 +42,30 @@ class OutOfStateAgent:
 
         if state in AGENTIC_STATES:
             return self._lookup_agentic(entity_name, state, property_id)
-        elif state in FORM_BASED_STATES:
-            return self._lookup_form_based(entity_name, state, property_id)
         elif supports_direct_url(state):
             return self._lookup_direct(entity_name, state, property_id)
         else:
             return self._lookup_via_search(entity_name, state, property_id)
 
     # ------------------------------------------------------------------
-    # Agentic dispatch (JS SPAs, click-through flows)
+    # Agentic dispatch (JS SPAs, click-through flows, server-rendered
+    # click-through flows — one module per state in agents/states/)
     # ------------------------------------------------------------------
 
     def _lookup_agentic(self, entity_name: str, state: str, property_id: str) -> OutOfStateResult:
         if state == "CA":
             return ca_agent.lookup(entity_name, property_id, self.scraper)
-        elif state == "NY": return ny_agent.lookup(entity_name, property_id, self.scraper)
-        elif state == "MD": return md_agent.lookup(entity_name, property_id, self.scraper)
-        elif state == "GA": return md_agent.lookup(entity_name, property_id, self.scraper)
+        elif state == "NY":
+            return ny_agent.lookup(entity_name, property_id, self.scraper)
+        elif state == "MD":
+            return md_agent.lookup(entity_name, property_id, self.scraper)
+        elif state == "GA":
+            return ga_agent.lookup(entity_name, property_id, self.scraper)
+        elif state == "NC":
+            return nc_agent.lookup(entity_name, property_id, self.scraper)
+        elif state == "DE":
+            return de_agent.lookup(entity_name, property_id, self.scraper)
         return OutOfStateResult(error=f"No agentic handler implemented for {state}")
-
-    # ------------------------------------------------------------------
-    # Form-based dispatch
-    # ------------------------------------------------------------------
-
-    def _lookup_form_based(self, entity_name: str, state: str, property_id: str) -> OutOfStateResult:
-        if state == "DE":
-            return self._lookup_de(entity_name, property_id)
-        return OutOfStateResult(error=f"No form handler implemented for {state}")
-
-    def _lookup_de(self, entity_name: str, property_id: str) -> OutOfStateResult:
-        steps = [
-            {"action": "navigate", "url": "https://icis.corp.delaware.gov/ecorp/entitysearch/namesearch.aspx"},
-            {"action": "fill_form", "selector": "#ctl00_ContentPlaceHolder1_txtEntityName", "value": entity_name},
-            {"action": "click", "selector": "#ctl00_ContentPlaceHolder1_btnSearch"},
-            {"action": "wait", "seconds": 2},
-        ]
-        try:
-            r = self.scraper.agentic_scraper(
-                url="https://icis.corp.delaware.gov/ecorp/entitysearch/namesearch.aspx",
-                user_prompt=(
-                    f"Find Delaware entity '{entity_name}'. "
-                    "Extract members/officers (name, title, address), principal address, "
-                    "mailing address, registered agent name, and agent address."
-                ),
-                steps=steps,
-                ai_extraction=True,
-            )
-            return OutOfStateResult(
-                entity_name=r.get("entity_name", entity_name),
-                state="DE",
-                managing_members=r.get("managing_members", []),
-                principal_address=r.get("principal_address"),
-                mailing_address=r.get("mailing_address"),
-                agent_name=r.get("agent_name"),
-                agent_address=r.get("agent_address"),
-            )
-        except Exception as e:
-            return OutOfStateResult(error=f"DE agentic scraper failed: {e}")
 
     # ------------------------------------------------------------------
     # Direct URL strategies (static / smartscraper)
@@ -145,7 +111,7 @@ class OutOfStateAgent:
         return self._parse_registry_info(entity_name, state, md, property_id)
 
     # ------------------------------------------------------------------
-    # Web search fallback (unknown states)
+    # Web search fallback (unknown states, or states with no useful registry)
     # ------------------------------------------------------------------
 
     def _lookup_via_search(self, entity_name: str, state: str, property_id: str) -> OutOfStateResult:
